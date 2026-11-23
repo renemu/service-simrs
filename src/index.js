@@ -74,11 +74,31 @@ app.use((req, res) => {
 
 // Global Error Handler
 app.use((err, req, res, _next) => {
-  const status = err?.statusCode || 500;
-  res.status(status).json({
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({
+      success: false,
+      status: 400,
+      error: "Bad Request",
+      message: "Invalid JSON payload.",
+      correlation_id: req.correlationId,
+    });
+  }
+
+  if (err?.message === "Origin not allowed by CORS") {
+    return res.status(403).json({
+      success: false,
+      status: 403,
+      error: "Forbidden",
+      message: err.message,
+      correlation_id: req.correlationId,
+    });
+  }
+
+  const status = err?.statusCode || err?.status || 500;
+  return res.status(status).json({
     success: false,
     status,
-    error: err?.errorLabel || "Internal Server Error",
+    error: err?.errorLabel || (status < 500 ? "Request Error" : "Internal Server Error"),
     message:
       config.nodeEnv === "production" && status >= 500
         ? "An internal service error occurred."

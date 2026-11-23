@@ -1,6 +1,11 @@
 import express from "express";
 import { callYiiApi } from "../lib/yiiClient.js";
 import { requireAuth } from "../middleware/auth.js";
+import {
+  validateLabOrderIdParam,
+  validateLabOrdersQuery,
+  validateLabResultCallback,
+} from "../middleware/validate.js";
 
 const router = express.Router();
 
@@ -11,7 +16,7 @@ const dispatchAuditLog = new Map();
  * GET /node-api/lab/orders
  * Lists lab orders via authoritative Yii2 API and attaches Node.js integration status metadata.
  */
-router.get("/orders", requireAuth, async (req, res, next) => {
+router.get("/orders", requireAuth, validateLabOrdersQuery, async (req, res, next) => {
   try {
     const { status, search, page, per_page } = req.query;
     const result = await callYiiApi("/api/lab-orders", {
@@ -50,18 +55,9 @@ router.get("/orders", requireAuth, async (req, res, next) => {
  * Simulates dispatching a lab order to an external LIS/analyzer with timeout & failure handling (FR-06.05, BR-13).
  * Query: ?simulate_failure=timeout|error (for testing integration failure handling)
  */
-router.post("/orders/:id/dispatch", requireAuth, async (req, res, next) => {
+router.post("/orders/:id/dispatch", requireAuth, validateLabOrderIdParam, async (req, res, next) => {
   try {
-    const orderId = Number(req.params.id);
-    if (!Number.isInteger(orderId) || orderId <= 0) {
-      return res.status(422).json({
-        success: false,
-        status: 422,
-        error: "Unprocessable Entity",
-        message: "Valid numeric lab order ID is required.",
-        correlation_id: req.correlationId,
-      });
-    }
+    const orderId = req.validatedOrderId;
 
     // Verify order exists & caller has permission in Yii2 first
     const orderRes = await callYiiApi(`/api/lab-orders/${orderId}`, {
@@ -139,36 +135,17 @@ router.post("/orders/:id/dispatch", requireAuth, async (req, res, next) => {
  * Receives external laboratory result payload, validates schema, and forwards authoritative write to Yii2.
  * Body: { lab_order_id, result_summary, reference_notes?, result_details? }
  */
-router.post("/results/callback", requireAuth, async (req, res, next) => {
+router.post("/results/callback", requireAuth, validateLabResultCallback, async (req, res, next) => {
   try {
-    const { lab_order_id, result_summary, reference_notes, result_details } = req.body || {};
-    const orderId = Number(lab_order_id);
-
-    const errors = {};
-    if (!Number.isInteger(orderId) || orderId <= 0) {
-      errors.lab_order_id = ["Valid lab_order_id is required."];
-    }
-    if (typeof result_summary !== "string" || result_summary.trim() === "") {
-      errors.result_summary = ["result_summary is required."];
-    }
-    if (Object.keys(errors).length > 0) {
-      return res.status(422).json({
-        success: false,
-        status: 422,
-        error: "Unprocessable Entity",
-        message: "Validation failed.",
-        errors,
-        correlation_id: req.correlationId,
-      });
-    }
+    const { orderId, result_summary, reference_notes, result_details } = req.validatedLabResult;
 
     const yiiRes = await callYiiApi(`/api/lab-orders/${orderId}/result`, {
       method: "POST",
       token: req.authToken,
       body: {
-        result_summary: result_summary.trim(),
-        reference_notes: reference_notes ? String(reference_notes).trim() : null,
-        result_details: result_details ?? null,
+        result_summary,
+        reference_notes,
+        result_details,
       },
       correlationId: req.correlationId,
       idempotencyKey: req.header("Idempotency-Key") || undefined,

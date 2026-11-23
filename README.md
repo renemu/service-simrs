@@ -6,11 +6,36 @@ Service ini berperan sebagai **Laboratory Integration Gateway** dan **Dashboard 
 
 ---
 
-## Batas Arsitektur & Prinsip Desain
+## Arsitektur Komunikasi (Node.js ↔ Yii2 ↔ PostgreSQL) & Pembagian Tanggung Jawab
 
-1. **Zero Direct Database Access**: Service Node.js tidak terhubung langsung ke PostgreSQL. Seluruh data inti dan penulisan otoritatif (termasuk penyimpanan hasil laboratorium) diteruskan ke **Backend Utama Yii2 (`backend-yii2`)** melalui REST API.
-2. **Zero Business Rule Duplication**: Validasi otorisasi RBAC (`PermissionFilter`), validasi `session_version`, perhitungan tagihan, dan perubahan status klinis tetap menjadi tanggung jawab penuh Yii2.
-3. **Truthful Downstream Error Handling (`BR-13`)**: Timeout atau kegagalan upstream/eksternal tidak pernah dilaporkan sebagai sukses; service mengembalikan `504 Gateway Timeout` atau `502 Bad Gateway` lengkap dengan `correlation_id` untuk kebutuhan rekonsiliasi.
+### 1. Alur Komunikasi Antar Service
+
+```text
+[React Frontend / External LIS]
+       │  HTTP/JSON + Bearer JWT + X-Correlation-Id (+ Idempotency-Key)
+       ▼
+[backend-node (Express.js :3001)]
+  ├── Middleware: correlationIdMiddleware -> requireAuth (HS256) -> validate* (422)
+  ├── Lab Gateway (/node-api/lab/*) & Dashboard Aggregation (/node-api/dashboard/*)
+  └── HTTP Client (src/lib/yiiClient.js: timeout eksplisit, error mapping 502/504)
+       │  REST API over HTTP/JSON (meneruskan Authorization, X-Correlation-Id, Idempotency-Key)
+       ▼
+[backend-yii2 (Yii2 / PHP :8080)]
+  ├── Authoritative Auth (session_version), RBAC PermissionFilter, & Business Rules
+  └── Transaksi ACID & Row-Level Locking
+       │  PDO / ActiveRecord
+       ▼
+[PostgreSQL (simrs_db :5432)]  <-- Single Source of Truth (seluruh migrasi di backend-yii2)
+```
+
+### 2. Pembagian Tanggung Jawab Data & Business Logic
+
+| Aspek | Backend Utama (`backend-yii2`) | Supporting Services (`backend-node`) | Database (`PostgreSQL`) |
+| :--- | :--- | :--- | :--- |
+| **Kepemilikan Data** | **Satu-satunya authoritative writer** untuk seluruh tabel operasional (pasien, kunjungan, antrean, rekam medis, tindakan, resep, stok obat, order & hasil lab, tagihan, pembayaran, user, role, audit log). | **Zero direct DB access** (tidak membuka koneksi tulis/baca langsung ke PostgreSQL). Hanya menyimpan `dispatchAuditLog` in-memory untuk demo status rekonsiliasi dispatch eksternal. | Single source of truth dengan Foreign Keys, Unique Constraints, Check Constraints (`stock >= 0`, `amount > 0`), dan transaksi ACID. |
+| **Business Logic & Validasi** | Aturan bisnis inti SIMRS (anti-duplikasi registrasi, nomor antrean atomik, snapshot tarif tindakan, pengurangan stok atomik, revisi invoice, pembayaran idempotent). | Validasi kontrak request masuk (format tanggal kalender `YYYY-MM-DD`, rentang `from <= to`, ID numerik, payload callback lab) melalui middleware `src/middleware/validate.js`. | Penegakan integritas data tingkat skema melalui migrasi Yii2 (`backend-yii2/migrations/`). |
+| **Autentikasi & Otorisasi** | Penerbitan JWT (`HS256`), proteksi brute-force (`auth_rate_limits`), verifikasi `session_version`, dan enforcement RBAC (`PermissionFilter`). | Verifikasi awal signature & expiry JWT (`requireAuth`) untuk menolak request ilegal lebih cepat, lalu meneruskan raw Bearer token ke Yii2 agar pemeriksaan `session_version` dan RBAC per modul tetap otoritatif. | Menyimpan tabel `users`, `roles`, `modules`, `user_logs`, `auth_rate_limits`. |
+| **Integrasi & Error Handling** | Menyediakan endpoint REST inti (`/api/lab-orders/*`, `/api/dashboard/metrics`) dan menyimpan hasil klinis secara persisten. | Gateway komunikasi eksternal (simulasi dispatch LIS & callback hasil lab), propagasi `X-Correlation-Id` & `Idempotency-Key`, serta pemetaan jujur `504 Gateway Timeout` / `502 Bad Gateway` saat downstream gagal (`BR-13`). | Menjamin rollback atomik jika transaksi penulisan gagal. |
 
 ---
 
@@ -24,13 +49,13 @@ Service ini berperan sebagai **Laboratory Integration Gateway** dan **Dashboard 
   - Mendukung parameter uji simulasi kegagalan `?simulate_failure=timeout` (`504`) dan `?simulate_failure=error` (`502`) untuk verifikasi aturan integrasi `BR-13`.
   - Menerima callback hasil laboratorium eksternal (`POST /node-api/lab/results/callback`), memvalidasi payload, lalu meneruskan penyimpanan otoritatif ke Yii2 (`POST /api/lab-orders/:id/result`) dengan propagasi header `Idempotency-Key`.
 - **Dashboard & Reports Aggregation (`/node-api/dashboard/*`)**
-  - Memvalidasi parameter filter rentang tanggal (`from`, `to` berformat `YYYY-MM-DD`, serta memastikan `from <= to`).
+  - Memvalidasi parameter filter rentang tanggal (`from`, `to` berformat `YYYY-MM-DD` valid, `from <= to`, serta `department_id` numerik positif).
   - Menyajikan ringkasan dashboard rawat jalan (`/summary`), agregasi kunjungan per poliklinik (`/visits-by-department`), dan pemakaian obat teratas (`/medicine-usage`) dari upstream Yii2 (`/api/dashboard/metrics`).
-- **Autentikasi JWT, Correlation ID & HTTP Client Tangguh**
-  - Verifikasi lokal token **JWT HS256** (`node:crypto` + `crypto.timingSafeEqual`) menggunakan `JWT_SECRET` yang sama dengan `backend-yii2`, lalu meneruskan Bearer token ke Yii2 agar pemeriksaan `session_version` dan RBAC tetap berjalan.
-  - Propagasi header `X-Correlation-Id` (mempertahankan header dari klien atau men-generate UUID otomatis) di setiap request & response.
-  - Timeout eksplisit menggunakan `AbortController` (`YII_TIMEOUT_MS`), serta kandidat resolusi host lokal (`localhost`, `127.0.0.1`, `[::1]`) untuk kelancaran development lokal.
-  - Response error (`401`, `404`, `422`, `502`, `504`, `500`) konsisten dalam format JSON.
+- **Middleware Autentikasi, Validasi Request, Correlation ID & Error Handling**
+  - `src/middleware/auth.js`: propagasi `X-Correlation-Id` (`correlationIdMiddleware`) & verifikasi lokal token **JWT HS256** (`requireAuth` dengan `node:crypto` + `crypto.timingSafeEqual`).
+  - `src/middleware/validate.js`: middleware Express khusus untuk validasi query tanggal/paginasi, parameter ID numerik, dan payload callback hasil lab (`422 Unprocessable Entity`).
+  - `src/lib/yiiClient.js`: HTTP client dengan `AbortController` timeout (`YII_TIMEOUT_MS`), kandidat host lokal (`localhost`, `127.0.0.1`, `[::1]`), dan pemetaan jujur `504 Gateway Timeout` / `502 Bad Gateway`.
+  - Global error handler & 404 handler yang konsisten mengembalikan JSON (`400` untuk malformed JSON, `401`, `403`, `404`, `422`, `502`, `504`, `500`).
 
 ---
 
@@ -44,7 +69,8 @@ backend-node/
 │   ├── lib/
 │   │   └── yiiClient.js           # HTTP client ke backend-yii2 (timeout, correlation ID, error mapping)
 │   ├── middleware/
-│   │   └── auth.js                # Middleware X-Correlation-Id & verifikasi Bearer JWT (HS256)
+│   │   ├── auth.js                # Middleware X-Correlation-Id & verifikasi Bearer JWT (HS256)
+│   │   └── validate.js            # Middleware validasi request (date range, query, param ID, callback body)
 │   ├── routes/
 │   │   ├── dashboard.routes.js    # Endpoint agregasi dashboard (/node-api/dashboard/*)
 │   │   └── lab.routes.js          # Endpoint integrasi lab (/node-api/lab/*)
