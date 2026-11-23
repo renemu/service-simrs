@@ -1,10 +1,13 @@
 import cors from "cors";
 import express from "express";
 import { config } from "./config/env.js";
+import { listModalities } from "./lib/modalityGateway.js";
 import { callYiiApi } from "./lib/yiiClient.js";
 import { correlationIdMiddleware } from "./middleware/auth.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import labRoutes from "./routes/lab.routes.js";
+import modalityRoutes from "./routes/modality.routes.js";
+import webhookRoutes from "./routes/webhook.routes.js";
 
 const app = express();
 
@@ -25,10 +28,21 @@ app.use(
       "Authorization",
       "Idempotency-Key",
       "X-Correlation-Id",
+      "X-External-Signature",
+      "X-External-Timestamp",
+      "X-External-Event-Id",
     ],
   })
 );
-app.use(express.json({ limit: "1mb" }));
+app.use(
+  express.json({
+    limit: "1mb",
+    verify(req, _res, buf) {
+      // Preserve exact raw UTF-8 payload bytes for HMAC-SHA256 webhook signature verification
+      req.rawBody = buf.toString("utf8");
+    },
+  })
+);
 app.use(correlationIdMiddleware);
 
 // Root & Health check
@@ -48,17 +62,29 @@ app.get(["/", "/health"], async (req, res) => {
   return res.json({
     success: true,
     service: "simrs-backend-node",
-    version: "1.0.0",
+    version: "1.2.0",
     environment: config.nodeEnv,
     status: "online",
     yii2_upstream: yiiStatus,
+    external_modality_gateway: {
+      mode: config.externalModality.mode,
+      inbound_webhook_enabled: Boolean(config.externalWebhook.secret && config.internalService.secret),
+      supported_modalities: listModalities().map((m) => ({
+        modality: m.modality,
+        code: m.code,
+        mode: m.mode,
+        status: m.status,
+      })),
+    },
     correlation_id: req.correlationId,
     server_time: new Date().toISOString(),
   });
 });
 
-// Supporting Services Routes (FR-10)
+// Supporting Services Routes (FR-06.05, FR-08, FR-10)
 app.use("/node-api/lab", labRoutes);
+app.use("/node-api/modalities", modalityRoutes);
+app.use("/node-api/webhooks", webhookRoutes);
 app.use("/node-api/dashboard", dashboardRoutes);
 
 // 404 Handler
@@ -109,6 +135,6 @@ app.use((err, req, res, _next) => {
 
 app.listen(config.port, () => {
   console.log(
-    `[simrs-backend-node] Supporting Services listening on http://localhost:${config.port} (Yii2 upstream: ${config.yiiApiUrl})`
+    `[simrs-backend-node] Supporting Services & External Modality Gateway (${config.externalModality.mode}) listening on http://localhost:${config.port} (Yii2 upstream: ${config.yiiApiUrl})`
   );
 });

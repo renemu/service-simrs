@@ -43,11 +43,19 @@ Service ini berperan sebagai **Laboratory Integration Gateway** dan **Dashboard 
 
 - **Health & Upstream Connectivity Check (`GET /`, `GET /health`)**
   - Memantau status service Node.js sekaligus memeriksa konektivitas upstream Yii2 (`yii2_upstream` dengan timeout `2500ms`).
-- **Laboratory Integration Gateway (`/node-api/lab/*`)**
-  - Mengambil daftar permintaan lab dari Yii2 (`GET /api/lab-orders`) dan melampirkan metadata status dispatch eksternal (`external_dispatch`).
-  - Simulasi pengiriman (dispatch) order laboratorium ke LIS/vendor eksternal (`POST /node-api/lab/orders/:id/dispatch`) setelah memverifikasi keberadaan order dan hak akses pengguna ke Yii2.
-  - Mendukung parameter uji simulasi kegagalan `?simulate_failure=timeout` (`504`) dan `?simulate_failure=error` (`502`) untuk verifikasi aturan integrasi `BR-13`.
-  - Menerima callback hasil laboratorium eksternal (`POST /node-api/lab/results/callback`), memvalidasi payload, lalu meneruskan penyimpanan otoritatif ke Yii2 (`POST /api/lab-orders/:id/result`) dengan propagasi header `Idempotency-Key`.
+- **External Modality Gateway (`/node-api/modalities/*`)**
+  - Menyediakan gateway terpadu ke sistem eksternal berbasis mekanis/radiologi: **CT-Scan** (`ct_scan`), **X-Ray** (`xray`), **MRI** (`mri`), **USG** (`usg`), **EKG** (`ekg`), dan **LIS Klinis** (`lab_clinical`).
+  - Berjalan dalam mode `dummy` secara default (`EXTERNAL_MODALITY_MODE=dummy`) dengan simulator perangkat DICOM/RIS/PACS realistis, serta siap beralih ke mode `live` (`EXTERNAL_CT_SCAN_URL`, `EXTERNAL_XRAY_URL`, `EXTERNAL_MRI_URL`, `EXTERNAL_USG_URL`, dll.) tanpa mengubah kontrak API.
+- **Laboratory & CT-Scan Integration Gateway (`/node-api/lab/*`)**
+  - Mengambil daftar permintaan lab & penunjang dari Yii2 (`GET /api/lab-orders`) beserta filter `modality_type` dan `integration_status`.
+  - Dispatch order **CT-Scan** (`POST /node-api/lab/orders/:id/ct-scan/dispatch`) maupun modalitas eksternal lainnya (`POST /node-api/lab/orders/:id/dispatch`) dengan penyimpanan status otoritatif (`dispatched` / `failed`, Accession Number, `dispatched_at`, `integration_error`) ke Yii2 `PATCH /api/lab-orders/:id/integration`.
+  - Penarikan & sinkronisasi hasil **CT-Scan** (`POST /node-api/lab/orders/:id/ct-scan/sync-result`) dan modalitas eksternal lainnya (`POST /node-api/lab/orders/:id/sync-external-result`) beserta metadata DICOM (Study UID, perangkat, parameter akuisisi, dosis radiasi DLP, temuan & kesan radiologi) ke Yii2 `POST /api/lab-orders/:id/result`.
+  - Mendukung parameter uji simulasi kegagalan `?simulate_failure=timeout` (`504`), `?simulate_failure=error` (`502`), dan `?simulate_failure=device_offline` (`503`) untuk verifikasi aturan integrasi `BR-13`.
+  - Menerima callback hasil eksternal (`POST /node-api/lab/results/callback`), memvalidasi payload, lalu meneruskan penyimpanan otoritatif ke Yii2 dengan propagasi header `Idempotency-Key`.
+- **Inbound Asynchronous Webhook dengan Verifikasi HMAC (`/node-api/webhooks/*`)**
+  - Menerima push hasil CT-Scan / X-Ray / MRI / USG secara asinkron dari RIS/PACS eksternal (`POST /node-api/webhooks/modalities/:modality/result`) **tanpa memerlukan JWT user**, diamankan dengan verifikasi `X-External-Timestamp` (anti-replay) dan `X-External-Signature` (`HMAC-SHA256` menggunakan `crypto.timingSafeEqual`).
+  - Meneruskan penulisan otoritatif ke Yii2 (`POST /api/internal/lab-orders/webhook-result`) melalui kanal machine-to-machine bertanda tangan `X-Service-Signature` (`INTERNAL_SERVICE_SECRET`).
+  - Menyediakan helper demo `POST /node-api/webhooks/modalities/:modality/simulate-push` untuk menguji push webhook bertanda tangan secara end-to-end.
 - **Dashboard & Reports Aggregation (`/node-api/dashboard/*`)**
   - Memvalidasi parameter filter rentang tanggal (`from`, `to` berformat `YYYY-MM-DD` valid, `from <= to`, serta `department_id` numerik positif).
   - Menyajikan ringkasan dashboard rawat jalan (`/summary`), agregasi kunjungan per poliklinik (`/visits-by-department`), dan pemakaian obat teratas (`/medicine-usage`) dari upstream Yii2 (`/api/dashboard/metrics`).

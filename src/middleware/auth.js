@@ -46,6 +46,17 @@ function verifyHs256Jwt(token, secret) {
 }
 
 /**
+ * Computes HMAC-SHA256 signature header value (`sha256=<hex>`) over `${timestamp}.${rawBody}`.
+ */
+export function computeHmacSignature(secret, timestamp, rawBody) {
+  const hex = crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest("hex");
+  return `sha256=${hex}`;
+}
+
+/**
  * Attaches X-Correlation-Id to every request & response for cross-service traceability (BR-13).
  */
 export function correlationIdMiddleware(req, res, next) {
@@ -87,4 +98,92 @@ export function requireAuth(req, res, next) {
   req.authToken = token;
   req.userClaims = payload;
   next();
+}
+
+/**
+ * Verifies inbound external RIS/PACS/modality webhook HMAC-SHA256 signatures without requiring a user JWT.
+ * Required headers:
+ *   - X-External-Timestamp: Unix epoch seconds (must be within ±EXTERNAL_WEBHOOK_MAX_SKEW_SEC)
+ *   - X-External-Signature: sha256=<hmac_hex_over_"${timestamp}.${rawBody}">
+ */
+export function requireWebhookSignature(req, res, next) {
+  const secret = config.externalWebhook.secret;
+  if (!secret) {
+    return res.status(503).json({
+      success: false,
+      status: 503,
+      error: "Service Unavailable",
+      message: "Inbound external webhook authentication is not configured (EXTERNAL_WEBHOOK_SECRET missing).",
+      correlation_id: req.correlationId,
+    });
+  }
+
+  const timestampRaw = String(req.header("X-External-Timestamp") || "").trim();
+  const signatureHeader = String(req.header("X-External-Signature") || "").trim();
+
+  if (!timestampRaw || !signatureHeader) {
+    return res.status(401).json({
+      success: false,
+      status: 401,
+      error: "Unauthorized",
+      message: "Missing X-External-Timestamp or X-External-Signature header.",
+      correlation_id: req.correlationId,
+    });
+  }
+
+  if (!/^\d+$/.test(timestampRaw)) {
+    return res.status(401).json({
+      success: false,
+      status: 401,
+      error: "Unauthorized",
+      message: "Invalid X-External-Timestamp format. Expected Unix epoch seconds.",
+      correlation_id: req.correlationId,
+    });
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const tsNum = Number(timestampRaw);
+  if (Math.abs(nowSec - tsNum) > config.externalWebhook.maxSkewSec) {
+    return res.status(401).json({
+      success: false,
+      status: 401,
+      error: "Unauthorized",
+      message: `Webhook timestamp expired or outside allowed replay window (±${config.externalWebhook.maxSkewSec}s).`,
+      correlation_id: req.correlationId,
+    });
+  }
+
+  if (!signatureHeader.startsWith("sha256=")) {
+    return res.status(401).json({
+      success: false,
+      status: 401,
+      error: "Unauthorized",
+      message: "Invalid X-External-Signature format. Expected sha256=<hex>.",
+      correlation_id: req.correlationId,
+    });
+  }
+
+  const rawBody = typeof req.rawBody === "string" ? req.rawBody : JSON.stringify(req.body || {});
+  const expectedHeader = computeHmacSignature(secret, timestampRaw, rawBody);
+
+  const expectedBuf = Buffer.from(expectedHeader, "utf8");
+  const actualBuf = Buffer.from(signatureHeader, "utf8");
+  if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
+    return res.status(401).json({
+      success: false,
+      status: 401,
+      error: "Unauthorized",
+      message: "Invalid X-External-Signature.",
+      correlation_id: req.correlationId,
+    });
+  }
+
+  req.webhookAuth = {
+    verified: true,
+    timestamp: tsNum,
+    event_id:
+      String(req.header("X-External-Event-Id") || req.header("Idempotency-Key") || "").trim() ||
+      null,
+  };
+  return next();
 }

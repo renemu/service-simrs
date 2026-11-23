@@ -1,4 +1,5 @@
 import { config } from "../config/env.js";
+import { computeHmacSignature } from "../middleware/auth.js";
 
 /**
  * Builds candidate upstream base URLs so local development works seamlessly whether
@@ -41,6 +42,7 @@ export async function callYiiApi(endpoint, options = {}) {
   const {
     method = "GET",
     token = null,
+    serviceAuth = false,
     body = undefined,
     params = null,
     correlationId = null,
@@ -62,14 +64,35 @@ export async function callYiiApi(endpoint, options = {}) {
     }
   }
 
+  const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
+
   const headers = {
     Accept: "application/json",
   };
-  if (body !== undefined) {
+  if (serializedBody !== undefined) {
     headers["Content-Type"] = "application/json";
   }
   if (token) {
     headers.Authorization = `Bearer ${token}`;
+  }
+  if (serviceAuth) {
+    const svcSecret = config.internalService.secret;
+    if (!svcSecret) {
+      const cfgErr = new Error(
+        "INTERNAL_SERVICE_SECRET is not configured on backend-node for machine-to-machine forwarding."
+      );
+      cfgErr.statusCode = 503;
+      cfgErr.errorLabel = "Service Unavailable";
+      throw cfgErr;
+    }
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    headers["X-Service-Name"] = config.internalService.name;
+    headers["X-Service-Timestamp"] = timestamp;
+    headers["X-Service-Signature"] = computeHmacSignature(
+      svcSecret,
+      timestamp,
+      serializedBody ?? ""
+    );
   }
   if (correlationId) {
     headers["X-Correlation-Id"] = correlationId;
@@ -81,7 +104,7 @@ export async function callYiiApi(endpoint, options = {}) {
   const fetchOptions = {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: serializedBody,
   };
 
   const baseCandidates = buildCandidateBaseUrls(config.yiiApiUrl);
