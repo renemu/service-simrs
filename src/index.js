@@ -7,6 +7,7 @@ import { correlationIdMiddleware } from "./middleware/auth.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import labRoutes from "./routes/lab.routes.js";
 import modalityRoutes from "./routes/modality.routes.js";
+import reportRoutes from "./routes/report.routes.js";
 import webhookRoutes from "./routes/webhook.routes.js";
 
 const app = express();
@@ -86,6 +87,7 @@ app.use("/node-api/lab", labRoutes);
 app.use("/node-api/modalities", modalityRoutes);
 app.use("/node-api/webhooks", webhookRoutes);
 app.use("/node-api/dashboard", dashboardRoutes);
+app.use("/node-api/reports", reportRoutes);
 
 // 404 Handler
 app.use((req, res) => {

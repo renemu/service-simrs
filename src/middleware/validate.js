@@ -67,6 +67,119 @@ export function validateDateRange(req, res, next) {
   return next();
 }
 
+const REPORT_PERIOD_MODES = ["day", "month", "range", "year"];
+const REPORT_TYPES = ["all", "visits", "morbidity", "procedures", "pharmacy", "laboratory", "finance"];
+const REPORT_VISIT_STATUSES = ["registered", "in_progress", "completed", "cancelled"];
+const REPORT_PAYMENT_STATUSES = ["unpaid", "partially_paid", "paid"];
+const REPORT_PAYMENT_METHODS = ["cash", "non_cash"];
+const REPORT_MODALITIES = ["lab_clinical", "ct_scan", "xray", "mri", "usg", "ekg", "other"];
+const REPORT_GENDERS = ["male", "female"];
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const YEAR_RE = /^\d{4}$/;
+
+/**
+ * Validates query parameters for /node-api/reports/summary and /node-api/reports/details.
+ */
+export function validateReportQuery(req, res, next) {
+  const {
+    period_mode = "month",
+    date,
+    month,
+    year,
+    from,
+    to,
+    report_type = "all",
+    department_id,
+    doctor_id,
+    visit_status,
+    payment_status,
+    payment_method,
+    modality_type,
+    gender,
+    page,
+    per_page,
+  } = req.query;
+
+  const errors = {};
+  const mode = String(period_mode).trim().toLowerCase();
+  const type = String(report_type).trim().toLowerCase();
+
+  if (!REPORT_PERIOD_MODES.includes(mode)) {
+    errors.period_mode = [`period_mode must be one of: ${REPORT_PERIOD_MODES.join(", ")}.`];
+  }
+
+  if (!REPORT_TYPES.includes(type)) {
+    errors.report_type = [`report_type must be one of: ${REPORT_TYPES.join(", ")}.`];
+  }
+
+  if (date !== undefined && String(date).trim() !== "" && !isValidCalendarDate(String(date).trim())) {
+    errors.date = ["date must be a valid date in YYYY-MM-DD format."];
+  }
+
+  if (month !== undefined && String(month).trim() !== "" && !MONTH_RE.test(String(month).trim())) {
+    errors.month = ["month must be a valid month in YYYY-MM format."];
+  }
+
+  if (year !== undefined && String(year).trim() !== "") {
+    const yStr = String(year).trim();
+    const yNum = Number(yStr);
+    if (!YEAR_RE.test(yStr) || yNum < 2000 || yNum > 2100) {
+      errors.year = ["year must be a 4-digit year between 2000 and 2100."];
+    }
+  }
+
+  if (from !== undefined && String(from).trim() !== "" && !isValidCalendarDate(String(from).trim())) {
+    errors.from = ["from must be a valid date in YYYY-MM-DD format."];
+  }
+
+  if (to !== undefined && String(to).trim() !== "" && !isValidCalendarDate(String(to).trim())) {
+    errors.to = ["to must be a valid date in YYYY-MM-DD format."];
+  }
+
+  if (!errors.from && !errors.to && from && to && String(from).trim() > String(to).trim()) {
+    errors.from = ["from date cannot be after to date."];
+  }
+
+  const checkPosInt = (val, key) => {
+    if (val !== undefined && String(val).trim() !== "") {
+      const n = Number(val);
+      if (!Number.isInteger(n) || n <= 0) {
+        errors[key] = [`${key} must be a positive integer.`];
+      }
+    }
+  };
+  checkPosInt(department_id, "department_id");
+  checkPosInt(doctor_id, "doctor_id");
+  checkPosInt(page, "page");
+
+  if (per_page !== undefined && String(per_page).trim() !== "") {
+    const pp = Number(per_page);
+    if (!Number.isInteger(pp) || pp <= 0 || pp > 100) {
+      errors.per_page = ["per_page must be an integer between 1 and 100."];
+    }
+  }
+
+  const checkEnum = (val, allowed, key) => {
+    if (val !== undefined && String(val).trim() !== "") {
+      const normalized = String(val).trim().toLowerCase();
+      if (!allowed.includes(normalized)) {
+        errors[key] = [`${key} must be one of: ${allowed.join(", ")}.`];
+      }
+    }
+  };
+  checkEnum(visit_status, REPORT_VISIT_STATUSES, "visit_status");
+  checkEnum(payment_status, REPORT_PAYMENT_STATUSES, "payment_status");
+  checkEnum(payment_method, REPORT_PAYMENT_METHODS, "payment_method");
+  checkEnum(modality_type, REPORT_MODALITIES, "modality_type");
+  checkEnum(gender, REPORT_GENDERS, "gender");
+
+  if (Object.keys(errors).length > 0) {
+    return sendValidationError(req, res, "Invalid report filter parameters.", errors);
+  }
+
+  return next();
+}
+
 /**
  * Validates query parameters on GET /node-api/lab/orders.
  */
